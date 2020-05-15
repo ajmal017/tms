@@ -54,6 +54,9 @@ def SetupLogger(self):
 
 
 class TestApp(EWrapper, EClient):
+    # Static member. Assigned in MyThread - getpositions
+    positionSymbol = ""
+
     def __init__(self):
         EWrapper.__init__(self)
         EClient.__init__(self, wrapper=self)
@@ -70,7 +73,9 @@ class TestApp(EWrapper, EClient):
 
         self.log = logging.getLogger('MY_LOGGER')  # DB Log
 
-    # Get the next order ID. Called automatically on startup
+        self.positionsDict = {}
+
+    # Get the next order ID. Called automatically on startup. If this method is not called - there is no connection
     def nextValidId(self, orderId: int):
         super().nextValidId(orderId)
         self.nextValidOrderId = orderId
@@ -118,8 +123,64 @@ class TestApp(EWrapper, EClient):
             print(error)
             self.log.error(error)
 
-
         self.printinstance(contractDetails)
+
+    # Called from reqPositions
+    def position(self, reqId, account:str, contract:Contract, position:float):
+    #def position(self, reqId, account, contract:Contract, position):
+
+        print(f"Positions reqId(from TWS)/DB ID: {reqId} / {self.timestamp}")
+        # Update response field
+        try:
+            record = Signal.objects.get(req_id=self.timestamp)
+            record.response_payload = 'reqPosition'  # contractDetails.liquidHours
+            record.status = 'processed'
+            record.save()
+        except:
+            error = 'Trading.py. Update Model query error. Most likely - no MYSQL connection. Code: 99uuyy5'
+            print(error)
+            self.log.error(error)
+
+        #self.printinstance(contract)
+        print("position worked: ")
+        print(account)
+        print(contract) # + " " + contract.secType + " " + contract.exchange + " " + contract.currency
+
+    # Called from reqPositionsMulti
+    def positionMulti(self, reqId: int, account: str, modelCode: str,
+                      contract: Contract, pos: float, avgCost: float):
+        super().positionMulti(reqId, account, modelCode, contract, pos, avgCost)
+        print("PositionMulti event. RequestId:", reqId, "Account:", account,
+              "ModelCode:", modelCode, "Symbol:", contract.symbol, "SecType:",
+              contract.secType, "Currency:", contract.currency, ",Position:",
+              pos, "AvgCost:", avgCost)
+        # Make positions array
+        # self.positionsArray.append([contract.symbol, pos]) # 2d array
+        self.positionsDict[contract.symbol] = pos
+
+    # When reqPositionsMulty finishes sending events, this is the final evet
+    def positionMultiEnd(self, reqId: int):
+        super().positionMultiEnd(reqId)
+        print("PositionMultiEnd. Finished sending positions. RequestId:", reqId)
+
+        if self.positionSymbol in self.positionsDict.keys():
+            print(self.positionsDict[self.positionSymbol])
+            positionVolume = self.positionsDict[self.positionSymbol]
+        else:
+            print('Not present')
+            positionVolume = "No position found for provided ticker"
+
+        # Update response field
+        try:
+            record = Signal.objects.get(req_id=self.timestamp)
+            # If in symbol specified - output the whole dictionary
+            record.response_payload = positionVolume if self.positionSymbol != "" else self.positionsDict
+            record.status = 'processed'
+            record.save()
+        except:
+            error = 'Trading.py. Update Model query error. Most likely - no MYSQL connection. Code: 99yjjj'
+            print(error)
+            self.log.error(error)
 
     # Called on reqCurrentTime
     def currentTime(self, time:int):
@@ -174,9 +235,16 @@ class TestApp(EWrapper, EClient):
         try:
             # Create IB instance and connect
             app = TestApp() # app instance created again! The first one is created in co.py! Fix this
-            app.connect("127.0.0.55", 4003, 0)  # 4002 7496. 4003 - linux
-            print("After connection attempt: serverVersion:%s connectionTime:%s" % (app.serverVersion(), app.twsConnectionTime()))
+
+            # Do not change this configuration. Just change port numbers in the IBGate or TWS
+            # 4003 is the default port number used in the docker container
+            #app.connect("127.0.0.55", 7496, 0)  # 4002 7496. 4003 - linux
+
+            app.connect("127.0.0.55", 4003, 0)
+
+            print("After connection attempt: serverVersion: %s connectionTime: %s" % (app.serverVersion(), app.twsConnectionTime()))
             app.reqCurrentTime()
+
 
             # Switch to live (1) frozen (2) delayed (3) delayed frozen (4).
             app.reqMarketDataType(MarketDataTypeEnum.DELAYED)
@@ -212,15 +280,19 @@ class MyThread(threading.Thread):
                     print(f"Watch loop: new record id: {record.id}")
                     rec = json.loads(record.request_payload)  # Parse json
 
-                    # Place an order. Multiple exchanges are supported. When use non US once - specify the currency!
-                    # http://127.0.0.1:8000/placeorder/market/lse/imm/gbp/20000/buy
                     if rec['url'] == 'placeorder':
                         self.app.nextOrderId()
                         contract = ContractSamples.USStock()
                         contract.exchange = rec['exchange']
                         contract.symbol = rec['symbol']
                         contract.currency = rec['currency']
-                        self.app.placeOrder(self.app.nextValidOrderId, contract, OrderSamples.MarketOrder(rec['direction'], rec['volume']))
+
+                        if rec['order_type'] == 'market':
+                            # Place market orders
+                            self.app.placeOrder(self.app.nextValidOrderId, contract, OrderSamples.MarketOrder(rec['direction'], rec['volume']))
+                        else:
+                            self.app.placeOrder(self.app.nextValidOrderId, contract, OrderSamples.LimitOrder(rec['direction'], rec['volume'], rec['price']))
+
                         print("Request payload (Trading.py placeorder):" + str(rec))
                         try:
                             record.status = "pending"
@@ -231,22 +303,38 @@ class MyThread(threading.Thread):
                             print(error)
                             self.log.error(error)
 
-                    # Place an order. Multiple exchanges are supported. When use non US once - specify the currency!
-                    # http://127.0.0.1:8000/getquote/nyse/ibkr/usd
-                    #
                     if rec['url'] == 'botstatus' and record.status != 'pending':
                         self.app.timeStamp()
-                        print('Entered bot status:' + str(i) + ' ' + str(self.app.timestamp))
+                        print('Entered bot status: ' + str(i) + ' ' + str(self.app.timestamp))
                         contract = ContractSamples.USStock()
                         contract.exchange = 'nyse'
                         contract.symbol = 'aapl'
                         self.app.reqContractDetails(self.app.timestamp, contract)
+                        #self.app.reqPositionsMulti(self.app.timestamp, "", "")
                         try:
                             record.status = "pending"
                             record.req_id = self.app.timestamp
                             record.save()
                         except:
                             error = 'Trading.py. Update Model query error. Most likely - no MYSQL connection. Code: 99oozz5'
+                            print(error)
+                            self.log.error(error)
+
+                    # Get all positions. Can be executed with symbol as an optional parameter
+                    # Response will be returned to positionMulti. positionMultiEnd - will be the finalizing event
+                    # https://interactivebrokers.github.io/tws-api/classIBApi_1_1EClient.html#a4fa2744c3459f9f6cf695980267608c3
+                    if rec['url'] == 'getpositions' and record.status != 'pending':
+                        self.app.timeStamp()
+                        print('Entered bot getpositions:' + str(i) + ' ' + str(self.app.timestamp))
+                        self.app.reqPositionsMulti(self.app.timestamp, "", "")
+                        TestApp.positionSymbol = rec['symbol'].upper()
+
+                        try:
+                            record.status = "pending"
+                            record.req_id = self.app.timestamp
+                            record.save()
+                        except:
+                            error = 'Trading.py. Update Model query error. Most likely - no MYSQL connection. Code: 26ooutt'
                             print(error)
                             self.log.error(error)
 

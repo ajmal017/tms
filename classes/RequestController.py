@@ -51,7 +51,7 @@ class PlaceOrder:
 
 
     @staticmethod
-    def placeorder(request, order_type, exchange, symbol, volume, direction, currency):
+    def placeorder(request, order_type, exchange, symbol, volume, direction, currency, price=""):
 
         # If there are pending tasks active
         if PlaceOrder.isLock(request): return HttpResponse(PlaceOrder.errorMessage)
@@ -63,6 +63,7 @@ class PlaceOrder:
             "symbol": symbol,
             "currency": currency,
             "volume": volume,
+            "price": price,
             "direction": direction,
             "status": "new"
         })
@@ -106,7 +107,6 @@ class PlaceOrder:
             record = Signal.objects.get(id=res.id)
             print(record)
             if record.response_payload != None:
-                # Return only price
                 return HttpResponse('Bot time: ' + str(datetime.datetime.now()) + '<br> Quote: ' + record.response_payload)
             time.sleep(1)
 
@@ -138,6 +138,34 @@ class PlaceOrder:
 
         return HttpResponse(
             'Cancel all timeout error. Response from the exchange has not been received within 10 seconds. ' + str(datetime.datetime.now()))
+
+    @staticmethod
+    def getpositions(request, symbol=""):
+
+        # If there are pending tasks active
+        if PlaceOrder.isLock(request): return HttpResponse(PlaceOrder.errorMessage)
+
+        requestPayload = json.dumps({
+            "url": "getpositions",
+            "symbol": symbol
+        })
+
+        # Add a record to bd
+        res = PlaceOrder.store(requestPayload)
+
+        # loop here. Wait 20 sec
+        for i in range(20):
+            record = Signal.objects.get(id=res.id)
+            print(record)
+            if record.response_payload != None:
+                # Return only price
+                return HttpResponse(
+                    'Bot time: ' + str(datetime.datetime.now()) + '<br> Get positions: ' + record.response_payload)
+            time.sleep(1)
+
+        return HttpResponse(
+            'Getorders timeout error. Response from the exchange has not been received within 10 seconds. ' + str(
+                datetime.datetime.now()))
 
     @staticmethod
     def isLock(request):
